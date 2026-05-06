@@ -1,244 +1,279 @@
 /**
- * VÍ DỤ SỬ DỤNG Buffer API Wrapper
+ * VÍ DỤ SỬ DỤNG BufferClient
  * ===================================
- * Yêu cầu: BUFFER_API_KEY, BUFFER_ORG_ID, BUFFER_CHANNELS trong .env
- * Nếu chưa có BUFFER_ORG_ID và BUFFER_CHANNELS, chạy setup.js trước:
+ * Yêu cầu: BUFFER_API_KEY, BUFFER_CHANNELS trong .env
+ * Chạy setup.js nếu chưa có BUFFER_CHANNELS:
  *   node --env-file=.env setup.js
  *
- * Cách chạy example:
- *   node --env-file=.env buffer_api_examples.js <1-6>
+ * Cách chạy:
+ *   node --env-file=.env buffer_api_examples.js <1-9>
  */
 
-const { createPost, createPostMultiChannel, POST_TYPE_CONFIG, driveToDirectUrl, dropboxToDirectUrl } = require("./buffer_api");
+const BufferClient = require("./buffer_api");
+const { isGoogleDriveUrl, resolveMediaUrl } = require("./utils/media");
 
-// Helper: đọc channels từ .env, báo lỗi nếu chưa có
-function getChannelsFromEnv() {
-  const raw = process.env.BUFFER_CHANNELS;
-  if (!raw) {
-    throw new Error("Chưa có BUFFER_CHANNELS trong .env. Hãy chạy: node --env-file=.env setup.js");
-  }
-  try {
-    return JSON.parse(raw);
-  } catch {
-    throw new Error("BUFFER_CHANNELS trong .env không hợp lệ JSON. Hãy chạy lại setup.js");
-  }
+const client = BufferClient.fromEnv();
+
+function getChannel(service) {
+  const channels = client.getChannelsFromEnv();
+  return channels.find((c) => c.service.toLowerCase() === service.toLowerCase());
+}
+
+function requireChannel(service) {
+  const ch = getChannel(service);
+  if (!ch) throw new Error(`Không tìm thấy channel "${service}". Kiểm tra lại kết nối trong Buffer.`);
+  return ch;
 }
 
 // ─────────────────────────────────────────────────────────────
-// EXAMPLE 1: Đăng text đơn giản vào queue tự động
+// EXAMPLE 1: Liệt kê channels (đọc từ .env)
 // ─────────────────────────────────────────────────────────────
-async function example1_textPost() {
-  console.log("📝 Example 1: Đăng text vào queue tự động\n");
+async function example1_listChannels() {
+  console.log("📋 Example 1: Liệt kê channels\n");
 
-  const channels = getChannelsFromEnv();
-  const channel = channels[0];
-  console.log(`   Đăng lên: ${channel.service} - ${channel.name}`);
-
-  const service = channel.service.toLowerCase();
-  const metadata = POST_TYPE_CONFIG[service]?.post ?? undefined;
-  const post = await createPost({
-    channelId: channel.id,
-    text: "Đây là bài đăng tự động từ Buffer API! 🎉",
-    metadata,
+  const channels = client.getChannelsFromEnv();
+  console.log(`   Tìm thấy ${channels.length} channel(s):\n`);
+  channels.forEach((ch, i) => {
+    console.log(`   ${i + 1}. [${ch.service.toUpperCase().padEnd(14)}] ${ch.name}`);
+    console.log(`      ID: ${ch.id}`);
   });
-
-  console.log("   ✅ Thành công!");
-  console.log(`   Post ID : ${post.id}`);
-  console.log(`   Nội dung: ${post.text}`);
-  console.log(`   Lên lịch: ${post.dueAt}`);
 }
 
 // ─────────────────────────────────────────────────────────────
-// EXAMPLE 2: Đăng bài kèm hình ảnh, lên lịch 3 phút tới
+// EXAMPLE 2: Facebook — post thường + lên lịch
 // ─────────────────────────────────────────────────────────────
-async function example2_imagePostScheduled() {
-  console.log("🖼️  Example 2: Đăng ảnh + lên lịch 3 phút tới\n");
+async function example2_facebookPost() {
+  console.log("📘 Example 2: Facebook — post thường\n");
 
-  const channels = getChannelsFromEnv();
-  const igChannel = channels.find((c) => c.service === "instagram") || channels[0];
-  console.log(`   Đăng lên: ${igChannel.service} - ${igChannel.name}`);
-
+  const ch = requireChannel("facebook");
   const scheduledAt = new Date(Date.now() + 3 * 60 * 1000).toISOString();
-  console.log(`   Lên lịch lúc: ${scheduledAt}`);
 
-  // Ảnh từ Google Drive: paste sharing link, hàm tự chuyển thành direct URL
-  // const imageUrl = driveToDirectUrl("https://drive.google.com/file/d/FILE_ID/view?usp=sharing");
-  const imageUrl = "https://picsum.photos/1080/1080";
-
-  const service = igChannel.service.toLowerCase();
-  const metadata = POST_TYPE_CONFIG[service]?.post ?? undefined;
-  const post = await createPost({
-    channelId: igChannel.id,
-    text: "Sản phẩm mới ra mắt! Đừng bỏ lỡ. #newproduct #launch",
+  const post = await client.facebook.createPost(ch.id, {
+    text: "Bài đăng mới từ Buffer API! 🚀\n\n#update #newfeature",
+    imageUrls: ["https://picsum.photos/1200/630"],
     scheduledAt,
-    imageUrls: [imageUrl],
-    metadata,
+    // firstComment: "Cảm ơn mọi người đã theo dõi!",
+    // linkAttachment: { url: "https://example.com" },
   });
 
-  console.log("   ✅ Thành công!");
-  console.log(`   Post ID : ${post.id}`);
-  console.log(`   Lên lịch: ${post.dueAt}`);
-  console.log(`   Ảnh đính kèm: ${post.assets?.length ?? 0} file`);
+  console.log(`   ✅ Post ID : ${post.id}`);
+  console.log(`   Lên lịch  : ${post.dueAt}`);
 }
 
 // ─────────────────────────────────────────────────────────────
-// EXAMPLE 3: Đăng bài lên NHIỀU nền tảng cùng lúc (use case chính)
+// EXAMPLE 3: Facebook Reel — video từ Google Drive (auto-detect)
 // ─────────────────────────────────────────────────────────────
-async function example3_multiPlatform() {
-  console.log("🌐 Example 3: Đăng bài lên nhiều nền tảng\n");
+async function example3_facebookReel() {
+  console.log("🎬 Example 3: Facebook Reel — video từ Drive\n");
 
-  const result = await createPostMultiChannel({
-    text: `🚀 Ra mắt tính năng mới!
+  const ch = requireChannel("facebook");
 
-Chúng tôi vừa cập nhật phiên bản mới với nhiều cải tiến vượt trội.
-Trải nghiệm ngay hôm nay!
+  // Paste sharing link Drive trực tiếp — auto-convert bên trong
+  const videoUrl = "https://drive.google.com/file/d/REPLACE_VIDEO_FILE_ID/view?usp=sharing";
+  if (isGoogleDriveUrl(videoUrl)) {
+    console.log(`   Drive URL → ${resolveMediaUrl(videoUrl, "video")}`);
+  }
 
-#update #newfeature #tech`,
-
-    platforms: ["tiktok", "facebook"],
+  const post = await client.facebook.createReel(ch.id, {
+    videoUrl,
+    text: "Reel mới ra mắt! 🎉 #reel #video",
     scheduledAt: new Date(Date.now() + 3 * 60 * 1000).toISOString(),
-    imageUrls: [
-      "https://picsum.photos/1080/1080",
-    ],
   });
 
-  console.log("   📊 Tổng hợp kết quả:");
-  console.log(`   Tổng số nền tảng : ${result.summary.total}`);
-  console.log(`   Thành công        : ${result.summary.succeeded}`);
-  console.log(`   Thất bại          : ${result.summary.failed}`);
-  console.log("\n   Chi tiết từng nền tảng:");
-
-  result.results.forEach((r) => {
-    if (r.status === "success") {
-      console.log(`   ✅ [${r.platform.toUpperCase()}] ${r.channelName}`);
-      console.log(`      Post ID : ${r.post.id}`);
-      console.log(`      Lên lịch: ${r.post.dueAt}`);
-    } else {
-      console.log(`   ❌ [${r.platform.toUpperCase()}] ${r.channelName}`);
-      console.log(`      Lỗi: ${r.error}`);
-    }
-  });
+  console.log(`   ✅ Post ID : ${post.id}`);
+  console.log(`   Lên lịch  : ${post.dueAt}`);
 }
 
 // ─────────────────────────────────────────────────────────────
-// EXAMPLE 4: Đăng lên TẤT CẢ channels (không lọc platform)
+// EXAMPLE 4: Instagram — post ảnh từ Drive + Story
 // ─────────────────────────────────────────────────────────────
-async function example4_allChannels() {
-  console.log("📡 Example 4: Đăng lên TẤT CẢ channels\n");
+async function example4_instagram() {
+  console.log("📸 Example 4: Instagram — post ảnh + story\n");
+
+  const ch = requireChannel("instagram");
   const scheduledAt = new Date(Date.now() + 3 * 60 * 1000).toISOString();
-  const result = await createPostMultiChannel({
-    text: "Thông báo quan trọng! Vui lòng đọc tin tức mới nhất từ chúng tôi.",
-    platforms: [],
+
+  // Post ảnh thường
+  const imageUrls = [
+    "https://drive.google.com/file/d/REPLACE_IMAGE_FILE_ID/view?usp=sharing",
+  ];
+  console.log("   [Post]");
+  const post = await client.instagram.createPost(ch.id, {
+    text:      "Sản phẩm mới ra mắt! 🌟 #newproduct",
+    imageUrls,
     scheduledAt,
+    firstComment: "Link trong bio 👆",
+  });
+  console.log(`   ✅ Post ID: ${post.id} | Lên lịch: ${post.dueAt}`);
+
+  // Story
+  console.log("\n   [Story]");
+  const story = await client.instagram.createStory(ch.id, {
+    imageUrls: ["https://picsum.photos/1080/1920"],
+    scheduledAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+  });
+  console.log(`   ✅ Post ID: ${story.id} | Lên lịch: ${story.dueAt}`);
+}
+
+// ─────────────────────────────────────────────────────────────
+// EXAMPLE 5: TikTok — video và photo slideshow
+// ─────────────────────────────────────────────────────────────
+async function example5_tiktok() {
+  console.log("🎵 Example 5: TikTok — video + photo slideshow\n");
+
+  const ch = requireChannel("tiktok");
+  const scheduledAt = new Date(Date.now() + 3 * 60 * 1000).toISOString();
+
+  // Video
+  console.log("   [Video]");
+  const video = await client.tiktok.createVideo(ch.id, {
+    videoUrl:  "https://drive.google.com/file/d/REPLACE_VIDEO_FILE_ID/view?usp=sharing",
+    text:      "Video trending hôm nay! 🔥 #tiktok #viral",
+    scheduledAt,
+  });
+  console.log(`   ✅ Post ID: ${video.id}`);
+
+  // Photo slideshow
+  console.log("\n   [Photo slideshow]");
+  const photo = await client.tiktok.createPhoto(ch.id, {
     imageUrls: [
-      "https://picsum.photos/1080/1080",
+      "https://picsum.photos/1080/1920",
+      "https://picsum.photos/1080/1920?v=2",
     ],
+    title:     "Album ảnh 2026",
+    text:      "Slideshow mới nhất! 📸 #photo",
+    scheduledAt: new Date(Date.now() + 6 * 60 * 1000).toISOString(),
+  });
+  console.log(`   ✅ Post ID: ${photo.id}`);
+}
+
+// ─────────────────────────────────────────────────────────────
+// EXAMPLE 6: Threads — bài đơn với metadata đầy đủ
+// ─────────────────────────────────────────────────────────────
+async function example6_threadsPost() {
+  console.log("🧵 Example 6: Threads — bài đơn\n");
+
+  const ch = requireChannel("threads");
+
+  const post = await client.threads.createPost(ch.id, {
+    text:      "Viết code tốt không phải là viết nhanh — mà là viết rõ ràng 💡",
+    scheduledAt: new Date(Date.now() + 3 * 60 * 1000).toISOString(),
+    // imageUrls: ["https://..."],
+    // linkAttachment: { url: "https://example.com/blog" },
+    // topic: "technology",
+  });
+
+  console.log(`   ✅ Post ID : ${post.id}`);
+  console.log(`   Lên lịch  : ${post.dueAt}`);
+}
+
+// ─────────────────────────────────────────────────────────────
+// EXAMPLE 7: Threads — chuỗi thread nhiều bài
+// ─────────────────────────────────────────────────────────────
+async function example7_threadsThread() {
+  console.log("🧵 Example 7: Threads — chuỗi thread 4 bài\n");
+
+  const ch = requireChannel("threads");
+
+  const posts = [
+    { text: "🧵 3 bài học tôi rút ra sau 5 năm làm lập trình viên (1/4)" },
+    { text: "1️⃣ Đọc code cũ trước khi viết code mới.\n\nPhần lớn bugs đến từ việc không hiểu context. (2/4)" },
+    { text: "2️⃣ Đặt tên biến như đang giải thích cho người khác.\n\n`data` → `activeUserList` (3/4)" },
+    { text: "3️⃣ Commit nhỏ và thường xuyên.\n\nMỗi commit làm đúng một việc. (4/4)\n\n— Bạn có thêm bài học nào? 👇" },
+  ];
+
+  console.log(`   Chuỗi ${posts.length} bài:`);
+  posts.forEach((p, i) => console.log(`   [${i + 1}] ${p.text.split("\n")[0]}`));
+  console.log();
+
+  const post = await client.threads.createThread(ch.id, {
+    posts,
+    scheduledAt: new Date(Date.now() + 3 * 60 * 1000).toISOString(),
+  });
+
+  console.log(`   ✅ Post ID : ${post.id}`);
+  console.log(`   Lên lịch  : ${post.dueAt}`);
+}
+
+// ─────────────────────────────────────────────────────────────
+// EXAMPLE 8: Multi-channel — đăng lên Facebook + Instagram cùng lúc
+// ─────────────────────────────────────────────────────────────
+async function example8_multiChannel() {
+  console.log("🌐 Example 8: Multi-channel — Facebook + Instagram\n");
+
+  const result = await client.postToChannels({
+    platforms: ["facebook", "instagram"],
+    text: `🚀 Ra mắt tính năng mới!\n\nCập nhật phiên bản mới với nhiều cải tiến.\nTrải nghiệm ngay!\n\n#update #newfeature`,
+    imageUrls:   ["https://picsum.photos/1080/1080"],
+    scheduledAt: new Date(Date.now() + 3 * 60 * 1000).toISOString(),
   });
 
   console.log(`   Tổng: ${result.summary.succeeded}/${result.summary.total} thành công\n`);
   result.results.forEach((r) => {
     if (r.status === "success") {
-      console.log(`   ✅ [${r.platform.toUpperCase()}] ${r.channelName}`);
-      console.log(`      Post ID : ${r.post.id}`);
-      console.log(`      Lên lịch: ${r.post.dueAt}`);
+      console.log(`   ✅ [${r.platform.toUpperCase()}] ${r.channelName} → ${r.post.id}`);
     } else {
-      console.log(`   ❌ [${r.platform.toUpperCase()}] ${r.channelName}`);
-      console.log(`      Lỗi: ${r.error}`);
+      console.log(`   ❌ [${r.platform.toUpperCase()}] ${r.channelName} → ${r.error}`);
     }
   });
 }
 
 // ─────────────────────────────────────────────────────────────
-// EXAMPLE 5: Xem danh sách channels (đọc từ .env, không gọi API)
+// EXAMPLE 9: Multi-channel — đăng lên TẤT CẢ platforms
 // ─────────────────────────────────────────────────────────────
-async function example5_listChannels() {
-  console.log("📋 Example 5: Liệt kê channels khả dụng\n");
+async function example9_allPlatforms() {
+  console.log("📡 Example 9: TẤT CẢ platforms\n");
 
-  const channels = getChannelsFromEnv();
-  console.log(`   Tìm thấy ${channels.length} channel(s):\n`);
-
-  channels.forEach((ch, i) => {
-    console.log(`   ${i + 1}. [${ch.service.toUpperCase().padEnd(12)}] ${ch.name}`);
-    console.log(`      Channel ID: ${ch.id}`);
-  });
-}
-
-// ─────────────────────────────────────────────────────────────
-// EXAMPLE 6: Đăng video (reel) lên TẤT CẢ nền tảng
-// ─────────────────────────────────────────────────────────────
-async function example6_videoAllPlatforms() {
-  console.log("🎬 Example 6: Đăng video lên TẤT CẢ nền tảng\n");
-
-  // Cách lấy URL video (chọn một trong các cách sau):
-  //   Drive (thử trước, có thể thất bại nếu Google chặn phía server Buffer):
-  //     const videoUrl = driveToDirectUrl("https://drive.google.com/file/d/FILE_ID/view", "video");
-  //   Dropbox (ổn định hơn):
-  //     const videoUrl = dropboxToDirectUrl("https://www.dropbox.com/s/.../video.mp4?dl=0");
-  //   Direct URL:
-  //     const videoUrl = "https://storage.googleapis.com/BUCKET/video.mp4";
-  //
-  // TikTok: ≤ 287 MB, 3–60 giây | Instagram Reel: ≤ 100 MB, 3–90 giây | Facebook Reel: ≤ 1 GB, 3–90 giây
-  const videoUrl = driveToDirectUrl("https://drive.google.com/file/d/1hvQssAnImZqcbOvLih3S919FKaoON-GF/view?usp=sharing", "video"); // ← đổi FILE_ID
-  const scheduledAt = new Date(Date.now() + 3 * 60 * 1000).toISOString();
-
-  console.log(`   Video URL : ${videoUrl}`);
-  console.log(`   Lên lịch  : ${scheduledAt}`);
-  console.log(`   Post type : reel (Facebook/Instagram) | video (TikTok auto-fallback)\n`);
-
-  // postType "reel" → Facebook/Instagram dùng reel, TikTok tự fallback về "video"
-  const result = await createPostMultiChannel({
-    text: `🎬 Video mới ra mắt!
-
-Xem ngay để không bỏ lỡ những khoảnh khắc thú vị.
-
-#video #reel #newcontent`,
-    platforms: [],
-    postType: "reel",
-    scheduledAt,
-    videoUrl,
+  const result = await client.postToChannels({
+    text:        "Thông báo quan trọng từ chúng tôi 📢",
+    imageUrls:   ["https://picsum.photos/1080/1080"],
+    scheduledAt: new Date(Date.now() + 3 * 60 * 1000).toISOString(),
   });
 
-  console.log("   📊 Tổng hợp kết quả:");
-  console.log(`   Tổng số nền tảng : ${result.summary.total}`);
-  console.log(`   Thành công        : ${result.summary.succeeded}`);
-  console.log(`   Thất bại          : ${result.summary.failed}`);
-  console.log("\n   Chi tiết từng nền tảng:");
-
+  console.log(`   Tổng: ${result.summary.succeeded}/${result.summary.total} thành công\n`);
   result.results.forEach((r) => {
-    if (r.status === "success") {
-      console.log(`   ✅ [${r.platform.toUpperCase()}] ${r.channelName} (${r.postType})`);
-      console.log(`      Post ID : ${r.post.id}`);
-      console.log(`      Lên lịch: ${r.post.dueAt}`);
-    } else {
-      console.log(`   ❌ [${r.platform.toUpperCase()}] ${r.channelName} (${r.postType})`);
-      console.log(`      Lỗi: ${r.error}`);
-    }
+    const icon = r.status === "success" ? "✅" : "❌";
+    const detail = r.status === "success" ? r.post.id : r.error;
+    console.log(`   ${icon} [${r.platform.toUpperCase().padEnd(14)}] ${r.channelName}`);
+    console.log(`      ${detail}`);
   });
 }
 
 // ─────────────────────────────────────────────────────────────
-// CHẠY ĐỀ MÔ
+// RUNNER
 // ─────────────────────────────────────────────────────────────
 (async () => {
   const examples = {
-    1: example1_textPost,
-    2: example2_imagePostScheduled,
-    3: example3_multiPlatform,
-    4: example4_allChannels,
-    5: example5_listChannels,
-    6: example6_videoAllPlatforms,
+    1: example1_listChannels,
+    2: example2_facebookPost,
+    3: example3_facebookReel,
+    4: example4_instagram,
+    5: example5_tiktok,
+    6: example6_threadsPost,
+    7: example7_threadsThread,
+    8: example8_multiChannel,
+    9: example9_allPlatforms,
   };
 
-  const exNum = parseInt(process.argv[2]);
+  const n = parseInt(process.argv[2]);
 
-  if (exNum && examples[exNum]) {
-    console.log(`\n${"=".repeat(50)}`);
-    await examples[exNum]().catch((e) => console.error("❌ Lỗi:", e.message));
-    console.log(`${"=".repeat(50)}\n`);
+  if (n && examples[n]) {
+    console.log(`\n${"=".repeat(55)}`);
+    await examples[n]().catch((e) => console.error("❌ Lỗi:", e.message));
+    console.log(`${"=".repeat(55)}\n`);
   } else {
-    console.log("\n💡 Chạy example cụ thể: node --env-file=.env buffer_api_examples.js <1-6>\n");
-    console.log(`${"=".repeat(50)}`);
-    await example5_listChannels().catch((e) => console.error("❌ Lỗi:", e.message));
-    console.log(`${"=".repeat(50)}\n`);
+    console.log("\n💡 node --env-file=.env buffer_api_examples.js <1-9>\n");
+    console.log("   1 — Liệt kê channels");
+    console.log("   2 — Facebook: post thường");
+    console.log("   3 — Facebook: Reel từ Google Drive");
+    console.log("   4 — Instagram: post ảnh + story");
+    console.log("   5 — TikTok: video + photo slideshow");
+    console.log("   6 — Threads: bài đơn");
+    console.log("   7 — Threads: chuỗi thread 4 bài");
+    console.log("   8 — Multi-channel: Facebook + Instagram");
+    console.log("   9 — Tất cả platforms");
+    console.log(`\n${"=".repeat(55)}`);
+    await example1_listChannels().catch((e) => console.error("❌ Lỗi:", e.message));
+    console.log(`${"=".repeat(55)}\n`);
   }
 })();
